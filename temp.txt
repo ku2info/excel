@@ -1,0 +1,86 @@
+require("dotenv").config();
+const { App } = require("@slack/bolt");
+
+const app = new App({
+  token: process.env.SLACK_BOT_TOKEN,
+  signingSecret: process.env.SLACK_SIGNING_SECRET,
+  socketMode: true,
+  appToken: process.env.SLACK_APP_TOKEN,
+});
+
+function tsToJstString(ts) {
+  // Slackのtsは "1234567890.12345" の文字列
+  const ms = Math.floor(Number(ts) * 1000);
+  const d = new Date(ms);
+  // JST表示（環境依存を避けたいなら Intl を使う）
+  return new Intl.DateTimeFormat("ja-JP", {
+    timeZone: "Asia/Tokyo",
+    dateStyle: "full",
+    timeStyle: "medium",
+  }).format(d);
+}
+
+app.shortcut("stamp_analysis", async ({ ack, body, client, logger }) => {
+  // 3秒以内にackが必要  [oai_citation:14‡Slack Developer Docs](https://docs.slack.dev/tools/java-slack-sdk/guides/shortcuts?utm_source=chatgpt.com)
+  await ack();
+
+  try {
+    const channel = body.channel?.id;
+    const messageTs = body.message?.ts;
+
+    // 1) reactions.getでリアクションを取得  [oai_citation:15‡Slack Developer Docs](https://docs.slack.dev/reference/methods/reactions.get/?utm_source=chatgpt.com)
+    const reactionsRes = await client.reactions.get({
+      channel,
+      timestamp: messageTs,
+      full: true,
+    });
+
+    const message = reactionsRes.message;
+    const postedAt = tsToJstString(messageTs);
+
+    // 2) 絵文字 -> user_id[] を整形
+    const reactions = (message.reactions || []).map((r) => {
+      const users = (r.users || []).map((u) => `<@${u}>`).join(", ");
+      return `:${r.name}:  ${users || "（なし）"}`;
+    });
+
+    const text =
+`元投稿日時: ${postedAt}
+チャンネル: <#${channel}>
+メッセージts: ${messageTs}
+
+誰が何のスタンプを押したか:
+${reactions.length ? reactions.join("\n") : "（リアクションなし）"}
+`;
+
+    // 3) モーダルに表示（入力枠っぽくコピペしやすい）
+    await client.views.open({
+      trigger_id: body.trigger_id,
+      view: {
+        type: "modal",
+        title: { type: "plain_text", text: "スタンプ分析" },
+        close: { type: "plain_text", text: "閉じる" },
+        blocks: [
+          {
+            type: "input",
+            block_id: "result_block",
+            label: { type: "plain_text", text: "結果（コピーして使えます）" },
+            element: {
+              type: "plain_text_input",
+              action_id: "result",
+              multiline: true,
+              initial_value: text,
+            },
+          },
+        ],
+      },
+    });
+  } catch (e) {
+    logger.error(e);
+  }
+});
+
+(async () => {
+  await app.start();
+  console.log("⚡️ Stamp Analysis app is running (Socket Mode)");
+})();
